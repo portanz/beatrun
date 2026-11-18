@@ -71,10 +71,6 @@ local PAGES = {
 		key = "gameplay",
 		label = "#beatrun.toolsmenu.gameplay.name",
 		items = {
-			{ type = "combo", convar = "Beatrun_AnimSet", label = "#beatrun.toolsmenu.gameplay.animset", choices = {
-				{ "#beatrun.toolsmenu.gameplay.animset1", 0 },
-				{ "#beatrun.toolsmenu.gameplay.animset2", 1 }
-			} },
 			{ type = "check", convar = "Beatrun_CatalystCoil", label = "#beatrun.toolsmenu.gameplay.catalystcoil", desc = "#beatrun.toolsmenu.gameplay.catalystcoildesc" },
 			{ type = "check", convar = "Beatrun_QuickturnGround", label = "#beatrun.toolsmenu.gameplay.quickturnground", desc = "#beatrun.toolsmenu.gameplay.quickturngrounddesc" },
 			{ type = "check", convar = "Beatrun_QuickturnHandsOnly", label = "#beatrun.toolsmenu.gameplay.quickturnhandsonly", desc = "#beatrun.toolsmenu.gameplay.quickturnhandsonlydesc" },
@@ -89,6 +85,17 @@ local PAGES = {
 			{ type = "help", label = "#beatrun.toolsmenu.extra.desc" },
 			{ type = "check", convar = "Beatrun_HUDStats", label = "#beatrun.toolsmenu.extra.stats", desc = "#beatrun.toolsmenu.extra.statsdesc" },
 			{ type = "check", convar = "Beatrun_HUDVerification", label = "#beatrun.toolsmenu.extra.speedrunsverif", desc = "#beatrun.toolsmenu.extra.speedrunsverifdesc" }
+		}
+	},
+	{
+		key = "animations",
+		label = "#beatrun.toolsmenu.animations.name",
+		items = {
+			{ type = "combo", convar = "Beatrun_AnimSet", label = "#beatrun.toolsmenu.gameplay.animset", desc = "#beatrun.toolsmenu.animations.animsetdesc", choices = {
+				{ "#beatrun.toolsmenu.gameplay.animset1", 0 },
+				{ "#beatrun.toolsmenu.gameplay.animset2", 1 }
+			} },
+			{ type = "animactions" }
 		}
 	},
 	{
@@ -224,6 +231,8 @@ builders.check = function(body, item)
 
 	local hint = Description(body, item.desc or "")
 	hint:DockMargin(S(28), S(2), 0, S(14))
+
+	return check
 end
 
 builders.slider = function(body, item)
@@ -313,6 +322,76 @@ builders.button = function(body, item)
 	btn:Dock(TOP)
 	btn:DockMargin(0, 0, 0, S(8))
 	btn.DoClick = function() RunConsoleCommand(item.command) end
+end
+
+-- Separate on/off check plus one animation set picker per action (AnimSets.lua). The pickers only do anything while the check is on
+builders.animactions = function(body)
+	local choices = {
+		{ "#beatrun.toolsmenu.animations.default", BEATRUN_ANIMSET_DEFAULT },
+		{ "#beatrun.toolsmenu.gameplay.animset1", BEATRUN_ANIMSET_REANIMATED },
+		{ "#beatrun.toolsmenu.gameplay.animset2", BEATRUN_ANIMSET_ORIGINAL }
+	}
+
+	local check = builders.check(body, { convar = "Beatrun_AnimSetPerAction", label = "#beatrun.toolsmenu.animations.peraction", desc = "#beatrun.toolsmenu.animations.peractiondesc" })
+
+	builders.title(body, { label = "#beatrun.toolsmenu.animations.actions" })
+
+	local rows, combos = {}, {}
+
+	for _, action in ipairs(BEATRUN_ANIM_ACTIONS) do
+		local cvar = GetConVar(action.convar)
+		local current = cvar and cvar:GetString() or tostring(BEATRUN_ANIMSET_DEFAULT)
+
+		local row = vgui.Create("DPanel", body)
+		row:Dock(TOP)
+		row:SetTall(S(32))
+		row:DockMargin(0, 0, 0, S(8))
+		row.Paint = nil
+
+		local combo = UI.MakeComboBox(row)
+		combo:Dock(RIGHT)
+		combo:SetWide(S(320))
+
+		for _, choice in ipairs(choices) do
+			combo:AddChoice(L(choice[1]), choice[2], tostring(choice[2]) == current)
+		end
+
+		combo.OnSelect = function(_, _, _, value) RunConsoleCommand(action.convar, tostring(value)) end
+
+		local label = UI.MakeLabel(row, action.label, "BeatrunUI")
+		label:Dock(FILL)
+		label:DockMargin(0, 0, S(12), 0)
+		label:SetContentAlignment(4)
+
+		rows[#rows + 1] = row
+		combos[#combos + 1] = combo
+	end
+
+	local reset = UI.MakeButton(body, "#beatrun.toolsmenu.animations.reset", "secondary", "BeatrunUI")
+	reset:Dock(TOP)
+	reset:DockMargin(0, S(6), 0, S(8))
+	reset.DoClick = function()
+		for _, combo in ipairs(combos) do
+			combo:ChooseOptionID(1) -- Default
+		end
+	end
+
+	local function SetEnabled(enabled)
+		for _, row in ipairs(rows) do
+			row:SetAlpha(enabled and 255 or 90)
+		end
+
+		for _, combo in ipairs(combos) do
+			combo:SetEnabled(enabled)
+		end
+
+		reset:SetEnabled(enabled)
+	end
+
+	-- Gets the new value before the convar has caught up
+	check.OnChange = function(_, value) SetEnabled(value) end
+
+	SetEnabled(GetConVar("Beatrun_AnimSetPerAction"):GetBool())
 end
 
 builders.gamemodes = function(body)

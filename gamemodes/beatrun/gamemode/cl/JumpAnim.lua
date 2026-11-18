@@ -1,4 +1,3 @@
-local AnimSet = CreateClientConVar("Beatrun_AnimSet", "0", true, false, "")
 local AutoHandSwitching = CreateClientConVar("Beatrun_AutoHandSwitching", "1", true, false)
 local CatalystCoil = CreateClientConVar("Beatrun_CatalystCoil", "0", true, false)
 
@@ -1459,10 +1458,15 @@ local function JumpCalcView(view)
 	end
 end
 
-local function CreateBodyAnimArmCopy()
+-- model is the animation set model to use, defaults to the body's. Arm-only anims (punches, hand on wall...)
+-- can be on another set than the body, see ArmCopyFor
+local function CreateBodyAnimArmCopy(model)
 	if not IsValid(BodyAnimArmCopy) and IsValid(BodyAnim) and not ignorebac[BodyAnimString] then
 		local ply = LocalPlayer()
-		BodyAnimArmCopy = ClientsideModel("models/" .. BodyAnimMDLString .. ".mdl", RENDERGROUP_BOTH)
+		model = model or BodyAnimMDLString
+		BodyAnimArmCopy = ClientsideModel("models/" .. model .. ".mdl", RENDERGROUP_BOTH)
+		BodyAnimArmCopy.animmodel = model
+		-- Sequence indices match between the animation sets, only the bone order differs
 		local seq = BodyAnim:GetSequence()
 
 		if seq then
@@ -1494,6 +1498,45 @@ local function CreateBodyAnimArmCopy()
 	end
 
 	return BodyAnimArmCopy
+end
+
+-- Only the arm copy, the body anim stays
+local function RemoveBodyAnimArmCopy()
+	if IsValid(BodyAnimArmCopy) then
+		-- JumpArmDraw parents the arms to the arm copy, hand them back to the body until it parents them to the new one
+		if IsValid(BodyAnimMDLarm) and IsValid(BodyAnim) and BodyAnimMDLarm:GetParent() == BodyAnimArmCopy then
+			BodyAnimMDLarm:SetParent(BodyAnim)
+		end
+
+		BodyAnimArmCopy:Remove()
+	end
+
+	BodyAnimArmCopy = nil
+end
+
+-- New arm copy on model (default the body's), easing from the old one's pose. The arm copy is drawn in its own
+-- camera space, so only the pose relative to the pelvis is blended (CapturePose without entityframe)
+local function ReplaceArmCopy(model)
+	local pose = BeatrunIK.CapturePose(BodyAnimArmCopy)
+
+	RemoveBodyAnimArmCopy()
+
+	local bac = CreateBodyAnimArmCopy(model)
+
+	BeatrunIK.BlendFromPose(bac, pose, BODYANIM_REBUILD_BLEND)
+
+	return bac
+end
+
+-- Arm copy on the animation set the arm-only anim seq uses, recreated if it's on the other one
+local function ArmCopyFor(seq)
+	local bac = CreateBodyAnimArmCopy()
+	if not IsValid(bac) or not BEATRUN_ANIMSET_MODELNAMES[BodyAnimMDLString] then return bac end
+
+	local model = BeatrunAnimModel(seq)
+	if bac.animmodel == model then return bac end
+
+	return ReplaceArmCopy(model)
 end
 
 hook.Add("BodyAnimRemove", "BodyAnimArmRemove", function()
@@ -1712,6 +1755,12 @@ local function JumpArmDraw() --(a, b, c)
 	local seq = BodyAnim:GetSequence()
 
 	if seq and (not arminterrupts[bac_seq] or bac:GetCycle() >= 1) then
+		-- An arm-only anim from the other animation set is over, follow the body again
+		if bac.animmodel ~= BodyAnimMDLString then
+			bac = ReplaceArmCopy()
+			if not IsValid(bac) then return end
+		end
+
 		if bac:GetSequence() ~= seq then
 			for _, v in ipairs(fingers) do
 				local b = bac:LookupBone(v)
@@ -1759,6 +1808,72 @@ hook.Add("CalcViewModelView", "lol", function(wep, vm, oldpos, oldang, pos, ang)
 	end
 end)
 
+-- Everything a fresh jump body anim needs once StartBodyAnim made it
+local function SetupJumpBodyAnim()
+	if not IsValid(BodyAnim) then return end
+
+	BodyAnim.beatrunjumpanim = true
+
+	CreateBodyAnimArmCopy()
+
+	if not LocalPlayer():ShouldDrawLocalPlayer() or CurTime() < 10 then
+		for k, v in ipairs(playermodelbones) do
+			local b = BodyAnim:LookupBone(v)
+
+			if b then
+				BodyAnim:ManipulateBonePosition(b, Vector(0, 0, 100 * (k == 1 and -1 or 1)))
+			end
+		end
+	end
+
+	hook.Add("BodyAnimCalcView", "JumpCalcView", JumpCalcView)
+	hook.Add("BodyAnimDrawArm", "JumpArmThink", JumpArmThink)
+	hook.Add("PreDrawViewModels", "JumpArmDraw", JumpArmDraw) -- was PostDrawOpaqueRenderables, changed to fix reflections and viewmodel lag
+end
+
+local ANIMSYNC_COOLDOWN = 0.1
+local nextanimsync = 0
+
+-- Moves the jump body anim to the animation set its current sequence uses (see AnimSets.lua). Sequences change
+-- from all over the place (SetSequence in movement code, transitions, server SendLua), so this runs every frame.
+-- force skips the cooldown, for parkour events that just started their anim
+local function SyncBodyAnimModel(force)
+	if not IsValid(BodyAnim) or not BodyAnim.beatrunjumpanim or not BEATRUN_ANIMSET_MODELNAMES[BodyAnimMDLString] then return end
+	if not LocalPlayer():Alive() then return end
+
+	local seq = BodyAnim:GetSequenceName(BodyAnim:GetSequence())
+	if CustomAnims[seq] then return end
+
+	local model = BeatrunAnimModel(seq)
+	if model == BodyAnimMDLString then return end
+
+	-- Two sequences on different sets taking turns (run and sprint around the speed threshold) would rebuild every frame
+	if not force and RealTime() < nextanimsync then return end
+
+	nextanimsync = RealTime() + ANIMSYNC_COOLDOWN
+
+	-- An arm-only anim (punch, hand on wall...) would be cut off by the new arm copy
+	local bac = BodyAnimArmCopy
+	local interrupt = ArmInterrupting(bac) and bac:GetSequenceName(bac:GetSequence())
+	local interruptcycle = interrupt and bac:GetCycle()
+	-- The rebuild replaces the arm copy too, which is what's seen in first person
+	local armpose = BeatrunIK.CapturePose(bac)
+
+	animtable.animmodelstring = model
+
+	if not RebuildBodyAnim(animtable) then return end
+
+	SetupJumpBodyAnim()
+
+	if interrupt then
+		ArmInterrupt(interrupt)
+
+		if IsValid(BodyAnimArmCopy) then BodyAnimArmCopy:SetCycle(interruptcycle) end
+	end
+
+	-- After ArmInterrupt, which can replace the arm copy once more
+	BeatrunIK.BlendFromPose(BodyAnimArmCopy, armpose, BODYANIM_REBUILD_BLEND)
+end
 
 local function JumpAnim(event, ply)
 	if CatalystCoil:GetBool() and event == "coil" and ply:UsingRH() then
@@ -1817,27 +1932,11 @@ local function JumpAnim(event, ply)
 
 		if not wasjumpanim then
 			CheckAnims()
-			StartBodyAnim(animtable)
-
-			if not IsValid(BodyAnim) then return end
-
-			CreateBodyAnimArmCopy()
-
-			if not ply:ShouldDrawLocalPlayer() or CurTime() < 10 then
-				for k, v in ipairs(playermodelbones) do
-					local b = BodyAnim:LookupBone(v)
-
-					if b then
-						BodyAnim:ManipulateBonePosition(b, Vector(0, 0, 100 * (k == 1 and -1 or 1)))
-					end
-				end
-			end
-
-			hook.Add("BodyAnimCalcView", "JumpCalcView", JumpCalcView)
-			hook.Add("BodyAnimDrawArm", "JumpArmThink", JumpArmThink)
-			hook.Add("PreDrawViewModels", "JumpArmDraw", JumpArmDraw) -- was PostDrawOpaqueRenderables, changed to fix reflections and viewmodel lag
 		else
 			BodyAnim:ResetSequence(BodyAnim:LookupSequence(BodyAnimString))
+
+			-- The new anim can be on the other animation set, switch now instead of showing a frame of the wrong one
+			SyncBodyAnimModel(true)
 		end
 	end
 end
@@ -1848,41 +1947,21 @@ function CheckAnims()
 
 	local customAnim = CustomAnims[BodyAnimString]
 
-	if customAnim then
-		animtable.animmodelstring = customAnim.model
-	elseif AnimSet:GetInt() == 0 then
-		animtable.animmodelstring = "new_climbanim"
-	else
-		animtable.animmodelstring = "old_climbanim"
-	end
+	animtable.animmodelstring = customAnim and customAnim.model or BeatrunAnimModel(BodyAnimString)
 
 	StartBodyAnim(animtable)
-
-	if not IsValid(BodyAnim) then return end
-
-	CreateBodyAnimArmCopy()
-
-	if not LocalPlayer():ShouldDrawLocalPlayer() or CurTime() < 10 then
-		for k, v in ipairs(playermodelbones) do
-			local b = BodyAnim:LookupBone(v)
-
-			if b then
-				BodyAnim:ManipulateBonePosition(b, Vector(0, 0, 100 * (k == 1 and -1 or 1)))
-			end
-		end
-	end
+	SetupJumpBodyAnim()
 end
 
-cvars.AddChangeCallback("Beatrun_AnimSet", function(cvar, vOld, vNew)
-	CheckAnims()
-end)
+-- Changing the animation set or a per-action one is picked up by SyncBodyAnimModel on the next frame,
+-- which keeps the anim going instead of restarting it like CheckAnims would
 
 hook.Add("PlayerInitialSpawn", "CheckAnims", CheckAnims)
 hook.Add("OnParkour", "JumpAnim", JumpAnim)
 
 function ArmInterrupt(anim)
 	if arminterrupts[anim] then
-		local arm = CreateBodyAnimArmCopy()
+		local arm = ArmCopyFor(anim)
 
 		if IsValid(arm) then
 			for _, v in ipairs(fingers) do
@@ -2306,4 +2385,7 @@ local function JumpThink()
 end
 
 
-hook.Add("Think", "JumpThink", JumpThink)
+hook.Add("Think", "JumpThink", function()
+	JumpThink()
+	SyncBodyAnimModel()
+end)

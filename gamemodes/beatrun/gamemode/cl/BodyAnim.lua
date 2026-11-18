@@ -186,6 +186,8 @@ ViewTiltAngle = Angle()
 local BodyAnimStartPos = Vector()
 local view = {}
 local justremoved = false
+local rebuilding = false -- RebuildBodyAnim is swapping the model, the anim itself carries on
+local rebuildscale = nil -- model scale the body anim being rebuilt had
 
 function BaDisableReflectionsAndShadows(self)
 	local currentRT = render.GetRenderTarget()
@@ -242,14 +244,17 @@ function RemoveBodyAnim(noang)
 			ply:SetEyeAngles(newang)
 		end
 
-		if not smoothend then
+		if not smoothend and not rebuilding then
 			endlerp = 1
 		end
 
 		BodyAnim:Remove()
 		justremoved = true
-		ply:DrawViewModel(true)
 		DidDraw = false
+
+		if rebuilding then return end
+
+		ply:DrawViewModel(true)
 	end
 
 	local currentwep = ply:GetActiveWeapon()
@@ -333,10 +338,14 @@ function CacheBodyAnim()
 	BodyAnim:SetupBones()
 	matrixfrompos:Set(LocalPlayer():GetPos())
 
+	-- Keyed by name, the next anim can be on the other animation set whose bones are in a different order
 	for i = 0, BodyAnim:GetBoneCount() - 1 do
 		local m = BodyAnim:GetBoneMatrix(i)
-		m:SetTranslation(m:GetTranslation() - pos)
-		cachebody[i] = m
+
+		if m then
+			m:SetTranslation(m:GetTranslation() - pos)
+			cachebody[BodyAnim:GetBoneName(i)] = m
+		end
 	end
 
 	matrixto = {}
@@ -363,14 +372,16 @@ function CacheLerpBodyAnim()
 		local to = matrixto
 
 		for bone = 0, this:GetBoneCount() - 1 do
-			if not armbones[BodyAnim:GetBoneName(bone)] then
+			local bonename = BodyAnim:GetBoneName(bone)
+
+			if not armbones[bonename] then
 				if not to[bone] then to[bone] = { {}, {}, {} } end
 
 				local ModelBoneMatrix = BodyAnim:GetBoneMatrix(bone)
 				ModelBoneMatrix:SetTranslation(ModelBoneMatrix:GetTranslation())
 
 				to[bone] = to[bone] or ModelBoneMatrix:FastToTable(to[bone])
-				from[bone] = cachebody[bone] and cachebody[bone]:FastToTable(from[bone]) or to[bone]
+				from[bone] = cachebody[bonename] and cachebody[bonename]:FastToTable(from[bone]) or to[bone]
 
 				local bonematrix = this:GetBoneMatrix(bone)
 				bonematrix:SetTranslation(bonematrix:GetTranslation() - pos)
@@ -449,7 +460,7 @@ function StartBodyAnim(animtable)
 	ply.OrigEyeAng = ply:EyeAngles()
 	ply.OrigEyeAng.x = 0
 
-	if VMLegs and VMLegs:IsActive() then
+	if VMLegs and VMLegs:IsActive() and not rebuilding then
 		VMLegs:Remove()
 	end
 
@@ -574,37 +585,117 @@ function StartBodyAnim(animtable)
 	DidDraw = false
 	angclosenuff = false
 
-	-- Apply all scaling systems after model setup
-	timer.Simple(0.5, function()
-		if not IsValid(BodyAnimMDL) then return end
-		local head_bone = ply:LookupBone("ValveBiped.Bip01_Head1")
-		if not head_bone then return end -- fixes a lua error in multiplayer when spamming respawns
-		local bodyscale = GetConVar("beatrun_bodyscale"):GetFloat()
-		local armscale = GetConVar("beatrun_armbodyscale"):GetFloat()
-		local modelscale = math.abs((select(1, ply:GetBonePosition(head_bone)).z - ply:GetPos().z + 1) / 64) * GetConVar("beatrun_modelscale"):GetFloat()
-		local bodyvec = Vector(bodyscale, bodyscale, bodyscale)
-		local armvec = Vector(armscale, armscale, armscale)
+	-- Apply all scaling systems after model setup. A rebuild swaps the model mid-anim, so it can't wait
+	if rebuilding then ApplyBodyAnimScales(ply) end
 
-		for i = 0, BodyAnimMDL:GetBoneCount() - 1 do
-			local bonename = BodyAnimMDL:GetBoneName(i)
-			if not armbones[bonename] then BodyAnimMDL:ManipulateBoneScale(i, bodyvec) end
-		end
-
-		BodyAnimHideHead()
-
-		if IsValid(BodyAnimMDLarm) then
-			for i = 0, BodyAnimMDLarm:GetBoneCount() - 1 do
-				BodyAnimMDLarm:ManipulateBoneScale(i, armvec)
-			end
-		end
-
-		-- Apply SetModelScale to BodyAnim (root entity)
-		if IsValid(BodyAnim) then
-			BodyAnim:SetModelScale(modelscale, 0.001)
-		end
-	end)
+	timer.Simple(0.5, function() ApplyBodyAnimScales(ply) end)
 
 	hook.Run("BodyAnimStart")
+end
+
+function ApplyBodyAnimScales(ply)
+	if not IsValid(BodyAnimMDL) or not IsValid(ply) then return end
+	local head_bone = ply:LookupBone("ValveBiped.Bip01_Head1")
+	if not head_bone then return end -- fixes a lua error in multiplayer when spamming respawns
+	local bodyscale = GetConVar("beatrun_bodyscale"):GetFloat()
+	local armscale = GetConVar("beatrun_armbodyscale"):GetFloat()
+	local modelscale = math.abs((select(1, ply:GetBonePosition(head_bone)).z - ply:GetPos().z + 1) / 64) * GetConVar("beatrun_modelscale"):GetFloat()
+	local bodyvec = Vector(bodyscale, bodyscale, bodyscale)
+	local armvec = Vector(armscale, armscale, armscale)
+
+	for i = 0, BodyAnimMDL:GetBoneCount() - 1 do
+		local bonename = BodyAnimMDL:GetBoneName(i)
+		if not armbones[bonename] then BodyAnimMDL:ManipulateBoneScale(i, bodyvec) end
+	end
+
+	BodyAnimHideHead()
+
+	if IsValid(BodyAnimMDLarm) then
+		for i = 0, BodyAnimMDLarm:GetBoneCount() - 1 do
+			BodyAnimMDLarm:ManipulateBoneScale(i, armvec)
+		end
+	end
+
+	-- Apply SetModelScale to BodyAnim (root entity)
+	if IsValid(BodyAnim) then
+		-- modelscale follows the player's head height right now, which has nothing to do with the anim that is
+		-- already running. A rebuilt body keeps the scale it had, also for the delayed apply 0.5s later
+		if rebuilding and rebuildscale then BodyAnim.keepmodelscale = rebuildscale end
+
+		BodyAnim:SetModelScale(BodyAnim.keepmodelscale or modelscale, rebuilding and 0 or 0.001)
+	end
+end
+
+-- How long a rebuilt body anim eases from the old model's pose into the new one's
+BODYANIM_REBUILD_BLEND = 0.2
+
+-- Recreates the running body anim on animtable.animmodelstring, used to switch animation set mid-anim.
+-- The playing sequence, its progress, the angles and the camera state carry over, so the anim keeps going
+-- instead of restarting, and the pose blends over instead of snapping. Returns true if the body anim is now on the new model
+function RebuildBodyAnim(animtable)
+	if not IsValid(BodyAnim) then return false end
+
+	local ply = LocalPlayer()
+	-- The body anim is drawn at its own position and angles, so the pelvis can blend relative to them
+	local pose = BeatrunIK.CapturePose(BodyAnim, true)
+
+	local state = {
+		seq = BodyAnim:GetSequenceName(BodyAnim:GetSequence()),
+		cycle = BodyAnimCycle,
+		ang = BodyAnim:GetAngles(),
+		origeyeang = ply.OrigEyeAng and Angle(ply.OrigEyeAng),
+		speed = BodyAnimSpeed,
+		limitx = BodyLimitX,
+		limity = BodyLimitY,
+		camignoreang = CamIgnoreAng,
+		camjoint = camjoint,
+		lockang = lockang,
+		followplayer = followplayer,
+		deleteonend = deleteonend,
+		endlerp = endlerp
+	}
+
+	animtable.AnimString = state.seq
+
+	rebuilding = true
+	rebuildscale = BodyAnim.keepmodelscale or BodyAnim:GetModelScale()
+
+	-- The flag must not stay stuck on if something errors, it'd keep the viewmodel hidden from then on
+	local ok, err = xpcall(function()
+		RemoveBodyAnim(true)
+		StartBodyAnim(animtable)
+	end, debug.traceback)
+
+	rebuilding = false
+	rebuildscale = nil
+	endlerp = state.endlerp
+
+	if not ok then
+		ErrorNoHalt(err .. "\n")
+
+		return false
+	end
+
+	if not IsValid(BodyAnim) or BodyAnimMDLString ~= animtable.animmodelstring then return false end
+
+	BodyAnimCycle = state.cycle
+	BodyAnim:SetCycle(state.cycle)
+	BodyAnim:SetAngles(state.ang)
+
+	if state.origeyeang then ply.OrigEyeAng = state.origeyeang end
+
+	BodyAnimSpeed = state.speed
+	BodyLimitX = state.limitx
+	BodyLimitY = state.limity
+	CamIgnoreAng = state.camignoreang
+	camjoint = state.camjoint
+	lockang = state.lockang
+	followplayer = state.followplayer
+	deleteonend = state.deleteonend
+
+	BeatrunIK.BlendFromPose(BodyAnim, pose, BODYANIM_REBUILD_BLEND)
+
+	return true
 end
 
 hook.Add("Think", "BodyAnimThink", function()

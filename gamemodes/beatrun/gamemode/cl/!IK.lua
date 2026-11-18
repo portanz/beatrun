@@ -95,13 +95,17 @@ local function BeginPass(ent)
 	return saved
 end
 
--- Use this instead of AddCallback("BuildBonePositions") for anything that moves bones with BeatrunIK
-function BeatrunIK.AddBoneCallback(ent, func)
+-- Use this instead of AddCallback("BuildBonePositions") for anything that moves bones with BeatrunIK.
+-- late callbacks run after all the others, whatever order they were added in
+function BeatrunIK.AddBoneCallback(ent, func, late)
 	local callbacks = ent.BeatrunIKCallbacks
 
 	if not callbacks then
 		callbacks = {}
 		ent.BeatrunIKCallbacks = callbacks
+		ent.BeatrunIKLateCallbacks = {}
+
+		local latecallbacks = ent.BeatrunIKLateCallbacks
 
 		ent:AddCallback("BuildBonePositions", function(e, numbones)
 			BeginPass(e)
@@ -109,17 +113,20 @@ function BeatrunIK.AddBoneCallback(ent, func)
 			for _, f in ipairs(callbacks) do
 				f(e, numbones)
 			end
+
+			for _, f in ipairs(latecallbacks) do
+				f(e, numbones)
+			end
 		end)
 	end
 
-	callbacks[#callbacks + 1] = func
+	local list = late and ent.BeatrunIKLateCallbacks or callbacks
+
+	list[#list + 1] = func
 end
 
--- Moves a bone by x -> q + R(x - p), rotating its orientation by R as well
-function BeatrunIK.MoveBone(ent, bone, r11, r12, r13, r21, r22, r23, r31, r32, r33, px, py, pz, qx, qy, qz)
-	local m = ent:GetBoneMatrix(bone)
-	if not m then return end
-
+-- Remembers the bone's pose from before this pass touched it, m is its current matrix
+local function TrackBone(ent, bone, m)
 	local saved = ent.BeatrunIKSaved or BeginPass(ent)
 	local state = saved[bone]
 
@@ -132,6 +139,27 @@ function BeatrunIK.MoveBone(ent, bone, r11, r12, r13, r21, r22, r23, r31, r32, r
 		state.before:Set(m)
 		state.touched = true
 	end
+
+	return state
+end
+
+-- Replaces a bone's matrix, safe to run on every pass like MoveBone
+function BeatrunIK.SetBoneMatrix(ent, bone, m)
+	local cur = ent:GetBoneMatrix(bone)
+	if not cur then return end
+
+	local state = TrackBone(ent, bone, cur)
+
+	ent:SetBoneMatrix(bone, m)
+	state.after:Set(m)
+end
+
+-- Moves a bone by x -> q + R(x - p), rotating its orientation by R as well
+function BeatrunIK.MoveBone(ent, bone, r11, r12, r13, r21, r22, r23, r31, r32, r33, px, py, pz, qx, qy, qz)
+	local m = ent:GetBoneMatrix(bone)
+	if not m then return end
+
+	local state = TrackBone(ent, bone, m)
 
 	local m11, m12, m13, tx, m21, m22, m23, ty, m31, m32, m33, tz = m:Unpack()
 
@@ -246,4 +274,148 @@ function BeatrunIK.ReachChain(ent, chain, tx, ty, tz, px, py, pz)
 	BeatrunIK.MoveBones(ent, chain.endbones, 1, 0, 0, 0, 1, 0, 0, 0, 1, ex, ey, ez, ex2, ey2, ez2)
 
 	return ex2, ey2, ez2
+end
+
+-- Pose blending, for when an anim moves to a new entity (the other animation set) and would otherwise snap to its pose.
+-- Bones are matched by name and kept relative to the pelvis (bone 0 on both sets): that doesn't care about the bone
+-- order or hierarchy, or where the entity is drawn (the arm copy is moved around between setups)
+
+local function EntityFrame(ent)
+	local m = Matrix()
+	m:SetAngles(ent:GetAngles())
+	m:SetTranslation(ent:GetPos())
+
+	return m
+end
+
+local MINSCALE = 1e-3
+
+-- Rotation and translation lerped from a to b, keeping b's scale. Zero scaled bones (hidden head) just take b
+local function BlendMatrix(a, b, w)
+	local as, bs = a:GetScale(), b:GetScale()
+	if as.x < MINSCALE or bs.x < MINSCALE then return b end
+
+	local fwd = LerpVector(w, a:GetForward():GetNormalized(), b:GetForward():GetNormalized())
+	local up = LerpVector(w, a:GetUp():GetNormalized(), b:GetUp():GetNormalized())
+
+	-- Opposite directions, nothing sensible to lerp through
+	if fwd:LengthSqr() < 1e-6 or fwd:Cross(up):LengthSqr() < 1e-6 then return b end
+
+	fwd:Normalize()
+
+	local out = Matrix()
+	out:SetAngles(fwd:AngleEx(up))
+	out:SetTranslation(LerpVector(w, a:GetTranslation(), b:GetTranslation()))
+	out:SetScale(bs)
+
+	return out
+end
+
+-- The entity's current pose. entityframe also keeps where the pelvis is relative to the entity's position and angles,
+-- only use it when the entity is drawn at GetPos/GetAngles (the body anim is, the arm copy isn't)
+function BeatrunIK.CapturePose(ent, entityframe)
+	if not IsValid(ent) or ent:GetBoneCount() < 1 then return end
+
+	ent:InvalidateBoneCache()
+	ent:SetupBones()
+
+	local anchor = ent:GetBoneMatrix(0)
+	local inv = anchor and anchor:GetInverse()
+	if not inv then return end
+
+	local pose = { bones = {}, params = {} }
+
+	-- Pose parameters are set from code every frame, a fresh entity would show its defaults until that runs again.
+	-- GetPoseParameter is normalized (0-1), SetPoseParameter wants the real value
+	for i = 0, ent:GetNumPoseParameters() - 1 do
+		local name = ent:GetPoseParameterName(i)
+		local min, max = ent:GetPoseParameterRange(i)
+
+		pose.params[name] = Lerp(ent:GetPoseParameter(name), min, max)
+	end
+
+	for i = 1, ent:GetBoneCount() - 1 do
+		local m = ent:GetBoneMatrix(i)
+
+		if m then pose.bones[ent:GetBoneName(i)] = inv * m end
+	end
+
+	if entityframe then
+		pose.anchor = EntityFrame(ent):GetInverseTR() * anchor
+	end
+
+	return pose
+end
+
+local function PoseBlend(ent)
+	local blend = ent.BeatrunPoseBlend
+	if not blend then return end
+
+	local w = (RealTime() - blend.start) / blend.duration
+
+	if w >= 1 then
+		ent.BeatrunPoseBlend = nil
+
+		return
+	end
+
+	w = w * w * (3 - 2 * w) -- smoothstep
+
+	local anchor = ent:GetBoneMatrix(0)
+	local inv = anchor and anchor:GetInverse()
+	if not inv then return end
+
+	local pose, names = blend.pose, blend.names
+	local newanchor = anchor
+
+	if pose.anchor then
+		local frame = EntityFrame(ent)
+
+		newanchor = frame * BlendMatrix(pose.anchor, frame:GetInverseTR() * anchor, w)
+
+		BeatrunIK.SetBoneMatrix(ent, 0, newanchor)
+	end
+
+	for i = 1, ent:GetBoneCount() - 1 do
+		local from = pose.bones[names[i]]
+
+		-- Without a blended pelvis a bone missing from the pose stays as it is
+		if from or pose.anchor then
+			local m = ent:GetBoneMatrix(i)
+
+			if m then
+				local rel = inv * m
+
+				BeatrunIK.SetBoneMatrix(ent, i, newanchor * (from and BlendMatrix(from, rel, w) or rel))
+			end
+		end
+	end
+end
+
+-- Eases ent from pose (CapturePose, usually of the entity it replaces) into its own animation over duration seconds.
+-- Runs after the other bone callbacks, so the IK of both poses is blended too
+function BeatrunIK.BlendFromPose(ent, pose, duration)
+	if not IsValid(ent) or not pose then return end
+
+	-- Right away, not eased: the blend covers the bones, and this is what keeps the new entity from rendering a
+	-- frame with every pose parameter at its default before the anim code sets them again
+	for name, value in pairs(pose.params) do
+		ent:SetPoseParameter(name, value)
+	end
+
+	if duration <= 0 then return end
+
+	local names = {}
+
+	for i = 0, ent:GetBoneCount() - 1 do
+		names[i] = ent:GetBoneName(i)
+	end
+
+	ent.BeatrunPoseBlend = { pose = pose, names = names, start = RealTime(), duration = duration }
+
+	if not ent.BeatrunPoseBlendAdded then
+		ent.BeatrunPoseBlendAdded = true
+
+		BeatrunIK.AddBoneCallback(ent, PoseBlend, true)
+	end
 end

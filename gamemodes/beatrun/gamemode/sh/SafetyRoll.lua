@@ -26,6 +26,7 @@ local function RollAnimCrouch(land, evade)
 	if land then
 		if IsValid(ply) and PlayerCannotStand(ply) then
 			roll.AnimString = roll.AnimString == "landgun" and "landguncrouch" or "landcrouch"
+			roll.animmodelstring = BeatrunAnimModel(roll.AnimString)
 
 			CacheBodyAnim()
 			RemoveBodyAnim()
@@ -35,6 +36,7 @@ local function RollAnimCrouch(land, evade)
 		timer.Simple(0.6, function()
 			if IsValid(ply) and PlayerCannotStand(ply) then
 				roll.AnimString = "evaderollcrouch"
+				roll.animmodelstring = BeatrunAnimModel(roll.AnimString)
 
 				CacheBodyAnim()
 				RemoveBodyAnim()
@@ -46,6 +48,7 @@ local function RollAnimCrouch(land, evade)
 			if IsValid(ply) and PlayerCannotStand(ply) then
 				local crouchAnim = roll.AnimString == "merollgun" and "merollguncrouch" or "merollcrouch"
 				roll.AnimString = crouchAnim
+				roll.animmodelstring = BeatrunAnimModel(roll.AnimString)
 
 				CacheBodyAnim()
 				RemoveBodyAnim()
@@ -108,10 +111,6 @@ hook.Add("SetupMove", "SafetyRoll", function(ply, mv, cmd)
 	end
 end)
 
-local function AnimSetModel()
-	return GetConVar("Beatrun_AnimSet"):GetInt() == 0 and "new_climbanim" or "old_climbanim"
-end
-
 local matfall = {
 	followplayer = true,
 	animmodelstring = "new_climbanim",
@@ -125,7 +124,7 @@ local matfall = {
 }
 
 local function StartMatFallAnim()
-	matfall.animmodelstring = AnimSetModel()
+	matfall.animmodelstring = BeatrunAnimModel(matfall.AnimString)
 
 	CacheBodyAnim()
 	RemoveBodyAnim()
@@ -141,24 +140,17 @@ net.Receive("RollAnimSP", function()
 
 	if land then
 		roll.AnimString = ply:UsingRH() and "land" or "landgun"
-		roll.animmodelstring = "new_climbanim"
 		roll.BodyAnimSpeed = 1
 	elseif evade then
 		roll.AnimString = "evaderoll"
-		roll.animmodelstring = "new_climbanim"
 		roll.BodyAnimSpeed = 1.5
 	else
 		roll.AnimString = ply:UsingRH() and "meroll" or "merollgun"
-		roll.animmodelstring = "new_climbanim"
 		roll.BodyAnimSpeed = 1.15
 	end
 
 	-- Apply selected animation set
-	if GetConVar("Beatrun_AnimSet"):GetInt() == 0 then
-		roll.animmodelstring = "new_climbanim"
-	else
-		roll.animmodelstring = "old_climbanim"
-	end
+	roll.animmodelstring = BeatrunAnimModel(roll.AnimString)
 
 	-- Start animation
 	CacheBodyAnim()
@@ -191,7 +183,6 @@ hook.Add("SetupMove", "EvadeRoll", function(ply, mv, cmd)
 		ply:SetSafetyRollTime(CurTime() + 0.9)
 
 		roll.AnimString = "evaderoll"
-		roll.animmodelstring = "new_climbanim"
 		roll.usefullbody = 2
 
 		if SERVER and not land then
@@ -210,11 +201,7 @@ hook.Add("SetupMove", "EvadeRoll", function(ply, mv, cmd)
 		end
 
 		if CLIENT and IsFirstTimePredicted() then
-			if GetConVar("Beatrun_AnimSet"):GetInt() == 0 then
-				roll.animmodelstring = "new_climbanim"
-			else
-				roll.animmodelstring = "old_climbanim"
-			end
+			roll.animmodelstring = BeatrunAnimModel(roll.AnimString)
 
 			CacheBodyAnim()
 			RemoveBodyAnim()
@@ -301,7 +288,6 @@ hook.Add("OnPlayerHitGround", "SafetyRoll", function(ply, water, floater, speed)
 			ply:SetSafetyRollTime(CurTime() + 0.6)
 
 			roll.AnimString = ply:UsingRH() and "land" or "landgun"
-			roll.animmodelstring = "new_climbanim"
 			roll.usefullbody = 2
 		else
 			land = false
@@ -310,7 +296,6 @@ hook.Add("OnPlayerHitGround", "SafetyRoll", function(ply, water, floater, speed)
 			ply:SetSafetyRollTime(CurTime() + 1.05)
 
 			roll.AnimString = ply:UsingRH() and "meroll" or "merollgun"
-			roll.animmodelstring = "new_climbanim"
 			roll.usefullbody = 2
 		end
 
@@ -336,11 +321,7 @@ hook.Add("OnPlayerHitGround", "SafetyRoll", function(ply, water, floater, speed)
 		end
 
 		if CLIENT and IsFirstTimePredicted() then
-			if GetConVar("Beatrun_AnimSet"):GetInt() == 0 then
-				roll.animmodelstring = "new_climbanim"
-			else
-				roll.animmodelstring = "old_climbanim"
-			end
+			roll.animmodelstring = BeatrunAnimModel(roll.AnimString)
 
 			CacheBodyAnim()
 			RemoveBodyAnim()
